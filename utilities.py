@@ -1,3 +1,4 @@
+import time
 import os
 import praw
 import requests
@@ -160,6 +161,38 @@ def save_media(post, location):
             with open(os.path.join(location, "media", filename), "wb") as f:
                 f.write(response.content)
                 return filename
+
+    # Is this a reddit gallery?
+    if domain == "reddit.com" and "gallery" in url:
+        json_url = url + ".json"
+        resp = requests.get(json_url)
+
+        sleep = 1
+        while resp.status_code == 429:
+            time.sleep(sleep)
+            print(f"Rate limited, sleeping for {sleep} seconds")
+            resp = requests.get(json_url)
+            sleep *= 2
+
+        data = resp.json()
+        post_data = data[0]["data"]["children"][0]["data"]
+        media = post_data.get("media_metadata")
+        if not media: return None
+        filenames = []
+        for idx, data in enumerate(list(media.values()), 1):
+            if "m" not in data: continue
+            ext = data["m"].split("/")[-1]
+            if "u" in data["s"]:
+                base_url = data["s"]["u"].replace("&amp;", "&")  # unescape URL
+            else:
+                continue
+            response = requests.get(base_url)
+            if response.status_code == 200:
+                filename = f"{readable_name}_{post.id}_{idx}.{ext}"
+                with open(os.path.join(location, "media", filename), "wb") as f:
+                    f.write(response.content)
+                    filenames.append(filename)
+        return filenames[0] if filenames else None
 
     # Is this a v.redd.it link?
     if domain == "redd.it":
