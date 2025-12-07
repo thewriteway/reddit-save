@@ -1,71 +1,28 @@
-import time
 import os
-import praw
-import requests
-from redvid import Downloader
-import yt_dlp
 import re
 from datetime import datetime
 
-try:
-    from logindata import REDDIT_USERNAME, REDDIT_PASSWORD
-    from logindata import REDDIT_CLIENT_ID, REDDIT_SECRET
-except ImportError:
-    REDDIT_USERNAME = os.getenv("REDDIT_USERNAME")
-    REDDIT_PASSWORD = os.getenv("REDDIT_PASSWORD")
-    REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
-    REDDIT_SECRET = os.getenv("REDDIT_SECRET")
+import praw
+import requests
+from redvid import Downloader
+from requests.exceptions import RequestException, Timeout
+import yt_dlp
 
-IMAGE_EXTENSIONS = ["gif", "gifv", "jpg", "jpeg", "png"]
-VIDEO_EXTENSIONS = ["mp4"]
-PLATFORMS = ["redgifs.com", "gfycat.com", "imgur.com", "youtube.com"]
+from logindata import (REDDIT_PASSWORD, REDDIT_USERNAME, client_id,
+                       client_secret)
 
+IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'bmp', 'gif', 'webp', 'tiff','gifv']
+VIDEO_EXTENSIONS = ['mp4', 'mkv', 'webm', 'flv', 'avi', 'mov']
+PLATFORMS = ['youtube.com', 'vimeo.com', 'dailymotion.com','redgifs.com', 'gfycat.com', 'imgur.com']  # Add more platforms as needed
 
 def make_client():
     """Creates a PRAW client with the details in the secrets.py file."""
 
-    print(REDDIT_USERNAME)
-
-    return praw.Reddit(
+    return praw.Reddit(client_id=client_id,
+        client_secret=client_secret,
+        user_agent="reddit-saver",
         username=REDDIT_USERNAME,
-        password=REDDIT_PASSWORD,
-        client_id=REDDIT_CLIENT_ID,
-        client_secret=REDDIT_SECRET,
-        user_agent="reddit-save",
-    )
-
-
-def get_previous(location, html_file):
-    html_files = [f for f in os.listdir(location) if f.endswith(".html")]
-    pattern = html_file.replace(".html", r"\.(\d+)?\.html")
-    matches = [re.match(pattern, f) for f in html_files]
-    matches = [m[0] for m in matches if m]
-    matches.sort(key=lambda x: int(x.split(".")[1]))
-    existing_ids = []
-    existing_posts_html = []
-    existing_comments_html = []
-    if html_file in html_files: matches.append(html_file)
-    for match in matches:
-        with open(os.path.join(location, match), encoding="utf-8") as f:
-            current_html = f.read()
-            for id in re.findall(r'id="(.+?)"', current_html):
-                if id not in existing_ids:
-                    existing_ids.append(id)
-            posts = re.findall(
-                r'(<div class="post"[\S\n\t\v ]+?<!--postend--><\/div>)',
-                current_html
-            )
-            comments = re.findall(
-                r'(<div class="comment"[\S\n\t\v ]+?<!--commentend--><\/div>)',
-                current_html
-            )
-            for post in posts:
-                if post not in existing_posts_html:
-                    existing_posts_html.append(post)
-            for comment in comments:
-                if comment not in existing_comments_html:
-                    existing_comments_html.append(comment)
-    return existing_ids, existing_posts_html, existing_comments_html
+        password=REDDIT_PASSWORD )
 
 
 def get_saved_posts(client):
@@ -92,22 +49,6 @@ def get_saved_comments(client):
     return [
         saved for saved in client.user.me().saved(limit=None)
         if saved.__class__.__name__ != "Submission"
-    ]
-
-
-def get_user_posts(client, username):
-    """Gets a list of posts that the user has made."""
-
-    return [
-        post for post in client.redditor(username).submissions.new(limit=None)
-    ]
-
-
-def get_user_comments(client, username):
-    """Gets a list of comments that the user has made."""
-
-    return [
-        comment for comment in client.redditor(username).comments.new(limit=None)
     ]
 
 
@@ -139,60 +80,30 @@ def save_media(post, location):
 
     url = post.url
     stripped_url = url.split("?")[0]
-    if url.endswith(post.permalink): return None
+    if url.endswith(post.permalink):
+        return None
 
-    # What is the key information?
     extension = stripped_url.split(".")[-1].lower()
     domain = ".".join(post.url.split("/")[2].split(".")[-2:])
     readable_name = list(filter(bool, post.permalink.split("/")))[-1]
 
     # If it's an imgur gallery, forget it
-    if domain == "imgur.com" and "gallery" in url: return None
+    if domain == "imgur.com" and "gallery" in url:
+        return None
 
     # Can the media be obtained directly?
     if extension in IMAGE_EXTENSIONS + VIDEO_EXTENSIONS:
         filename = f"{readable_name}_{post.id}.{extension}"
         try:
-            response = requests.get(post.url)
-        except:
-            return
-        media_type = response.headers.get("Content-Type", "")
-        if media_type.startswith("image") or media_type.startswith("video"):
-            with open(os.path.join(location, "media", filename), "wb") as f:
-                f.write(response.content)
-                return filename
-
-    # Is this a reddit gallery?
-    if domain == "reddit.com" and "gallery" in url:
-        json_url = url + ".json"
-        resp = requests.get(json_url)
-
-        sleep = 1
-        while resp.status_code == 429:
-            time.sleep(sleep)
-            print(f"Rate limited, sleeping for {sleep} seconds")
-            resp = requests.get(json_url)
-            sleep *= 2
-
-        data = resp.json()
-        post_data = data[0]["data"]["children"][0]["data"]
-        media = post_data.get("media_metadata")
-        if not media: return None
-        filenames = []
-        for idx, data in enumerate(list(media.values()), 1):
-            if "m" not in data: continue
-            ext = data["m"].split("/")[-1]
-            if "u" in data["s"]:
-                base_url = data["s"]["u"].replace("&amp;", "&")  # unescape URL
-            else:
-                continue
-            response = requests.get(base_url)
-            if response.status_code == 200:
-                filename = f"{readable_name}_{post.id}_{idx}.{ext}"
+            response = requests.get(post.url, timeout=10)
+            media_type = response.headers.get("Content-Type", "")
+            if media_type.startswith("image") or media_type.startswith("video"):
                 with open(os.path.join(location, "media", filename), "wb") as f:
                     f.write(response.content)
-                    filenames.append(filename)
-        return filenames[0] if filenames else None
+                return filename
+        except (RequestException, Timeout) as e:
+            print(f"Request failed: {e}")
+            return None
 
     # Is this a v.redd.it link?
     if domain == "redd.it":
@@ -205,53 +116,66 @@ def save_media(post, location):
             filename = f"{readable_name}_{post.id}.{extension}"
             os.rename(name, os.path.join(location, "media", filename))
             return filename
-        except:
+        except Exception as e:
+            print(f"v.redd.it download failed: {e}")
             os.chdir(current)
             return None
 
     # Is it a gfycat link that redirects? Update the URL if possible
     if domain == "gfycat.com":
-        html = requests.get(post.url).content
-        if len(html) < 50000:
-            match = re.search(r"http([\dA-Za-z\+\:\/\.]+)\.mp4", html.decode())
-            if match:
-                url = match.group()
-            else:
-                return None
+        try:
+            html = requests.get(post.url, timeout=10).content
+            if len(html) < 50000:
+                match = re.search(r"http([\dA-Za-z\+\:\/\.]+)\.mp4", html.decode())
+                if match:
+                    url = match.group()
+                else:
+                    return None
+        except (RequestException, Timeout) as e:
+            print(f"gfycat request failed: {e}")
+            return None
 
     # Is this an imgur image?
     if domain == "imgur.com" and extension != "gifv":
-        for extension in IMAGE_EXTENSIONS:
-            direct_url = f'https://i.{url[url.find("//") + 2:]}.{extension}'
+        for ext in IMAGE_EXTENSIONS:
+            direct_url = f'https://i.{url[url.find("//") + 2:]}.{ext}'
             direct_url = direct_url.replace("i.imgur.com", "imgur.com")
             direct_url = direct_url.replace("m.imgur.com", "imgur.com")
             try:
-                response = requests.get(direct_url)
-            except: continue
-            if response.status_code == 200:
-                filename = f"{readable_name}_{post.id}.{extension}"
-                with open(os.path.join(location, "media", filename), "wb") as f:
-                    f.write(response.content)
+                response = requests.get(direct_url, timeout=10)
+                if response.status_code == 200:
+                    filename = f"{readable_name}_{post.id}.{ext}"
+                    with open(os.path.join(location, "media", filename), "wb") as f:
+                        f.write(response.content)
                     return filename
+            except (RequestException, Timeout) as e:
+                print(f"Imgur request failed: {e}")
+                return None
 
-    # Try to use youtube_dl if it's one of the possible domains
+    # Try to use yt-dlp if it's one of the possible domains
     if domain in PLATFORMS:
         options = {
-            "nocheckcertificate": True, "quiet": True, "no_warnings": True,
-            "ignoreerrors": True, "no-progress": True,
+            "nocheckcertificate": True,
+            "quiet": True,
+            "no_warnings": True,
+            "ignoreerrors": True,
             "outtmpl": os.path.join(
                 location, "media", f"{readable_name}_{post.id}" + ".%(ext)s"
-            )
+            ),
+            "timeout": 10  # Set the timeout to 10 seconds
         }
-        with yt_dlp.YoutubeDL(options) as ydl:
-            try:
+        try:
+            with yt_dlp.YoutubeDL(options) as ydl:
                 ydl.download([url])
-            except:
-                os.chdir(current)
-                return
+        except Exception as e:
+            print(f"yt-dlp download failed: {e}")
+            return None
+
         for f in os.listdir(os.path.join(location, "media")):
             if f.startswith(f"{readable_name}_{post.id}"):
                 return f
+
+    return None  # Return None if no media was found or downloaded
 
 
 def add_media_preview_to_html(post_html, media):
@@ -327,29 +251,3 @@ def get_comment_html(comment, children=True, op=None):
             children_html.append(get_comment_html(child, children=False, op=op))
         html = html.replace("<!--children-->", "\n".join(children_html))
     return html
-
-
-def save_html(posts, comments, location, html_file, page, has_next, username=None):
-    if username:
-        with open(os.path.join("html", "username.html"), encoding="utf-8") as f:
-            html = f.read().replace("[username]", username)
-    else:
-        with open(os.path.join("html", html_file), encoding="utf-8") as f:
-            html = f.read()
-    with open(os.path.join("html", "style.css"), encoding="utf-8") as f:
-        html = html.replace("<style></style>", f"<style>\n{f.read()}\n</style>")
-    with open(os.path.join("html", "main.js"), encoding="utf-8") as f:
-        html = html.replace("<script></script>", f"<script>\n{f.read()}\n</script>")
-    if page == 0 or page is None:
-        html = html.replace("Previous</a>", "</a>")
-    else:
-        html = html.replace(".p.html", f".{page-1}.html")
-    if not has_next or page is None:
-        html = html.replace("Next</a>", "</a>")
-    else:
-        html = html.replace(".n.html", f".{page+1}.html")
-    html = html.replace("<!--posts-->", "\n".join(posts))
-    html = html.replace("<!--comments-->", "\n".join(comments))
-    file_name = html_file if page is None else html_file.replace(".html", f".{page}.html")
-    with open(os.path.join(location, file_name), "w", encoding="utf-8") as f:
-        f.write(html)
